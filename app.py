@@ -72,10 +72,16 @@ def get_weather_description(code):
 
 
 # =========================================================
-# GET LOCATION
+# GET CITY COORDINATES
+#
+# Cached for 24 hours.
+# Same city won't repeatedly hit the geocoding API.
 # =========================================================
 
-@st.cache_data(ttl=86400)
+@st.cache_data(
+    ttl=86400,
+    max_entries=500
+)
 def get_coordinates(city):
 
     url = "https://geocoding-api.open-meteo.com/v1/search"
@@ -85,9 +91,6 @@ def get_coordinates(city):
         "count": 10,
         "language": "en",
         "format": "json",
-
-        # IMPORTANT:
-        # Search specifically within India
         "countryCode": "IN"
     }
 
@@ -96,15 +99,35 @@ def get_coordinates(city):
         response = requests.get(
             url,
             params=params,
-            timeout=10
+            timeout=15
         )
+
+        if response.status_code == 429:
+            return {
+                "error": "rate_limit"
+            }
 
         response.raise_for_status()
 
         data = response.json()
 
-    except requests.RequestException:
-        return None
+    except requests.exceptions.Timeout:
+
+        return {
+            "error": "timeout"
+        }
+
+    except requests.exceptions.ConnectionError:
+
+        return {
+            "error": "connection"
+        }
+
+    except requests.exceptions.RequestException:
+
+        return {
+            "error": "request"
+        }
 
     if "results" not in data:
         return None
@@ -112,7 +135,7 @@ def get_coordinates(city):
     if len(data["results"]) == 0:
         return None
 
-    # Pick the most populated / prominent result
+    # Prefer the most populated/prominent location
     results = sorted(
         data["results"],
         key=lambda x: x.get("population", 0),
@@ -132,10 +155,16 @@ def get_coordinates(city):
 
 
 # =========================================================
-# GET WEATHER
+# GET WEATHER DATA
+#
+# Cached for 30 minutes.
+# This dramatically reduces repeated API calls.
 # =========================================================
 
-@st.cache_data(ttl=1800)
+@st.cache_data(
+    ttl=1800,
+    max_entries=200
+)
 def get_weather(latitude, longitude):
 
     url = "https://api.open-meteo.com/v1/forecast"
@@ -173,67 +202,91 @@ def get_weather(latitude, longitude):
             timeout=20
         )
 
-        # THIS IS IMPORTANT
-        # If Open-Meteo rejects the request,
-        # show us exactly why.
+        # ---------------------------------------------
+        # RATE LIMIT
+        # ---------------------------------------------
+
+        if response.status_code == 429:
+
+            return {
+                "error": "rate_limit"
+            }
+
+        # ---------------------------------------------
+        # OTHER API ERROR
+        # ---------------------------------------------
+
         if response.status_code != 200:
 
-            st.error(
-                f"Weather API error: "
-                f"{response.status_code}"
-            )
-
-            st.code(response.text)
-
-            return None
+            return {
+                "error": "api",
+                "status": response.status_code,
+                "message": response.text
+            }
 
         data = response.json()
 
-        # Check whether API returned an error
+        # ---------------------------------------------
+        # OPEN-METEO ERROR
+        # ---------------------------------------------
+
         if data.get("error"):
 
-            st.error(
-                data.get(
+            return {
+                "error": "api",
+                "message": data.get(
                     "reason",
-                    "Unknown Open-Meteo error"
+                    "Unknown weather API error"
                 )
+            }
+
+        return {
+            "success": True,
+            "data": data,
+            "updated_at": datetime.now().strftime(
+                "%d %b %Y, %I:%M %p"
             )
-
-            return None
-
-        return data
+        }
 
     except requests.exceptions.Timeout:
 
-        st.error(
-            "The weather service took too long to respond."
-        )
-
-        return None
+        return {
+            "error": "timeout"
+        }
 
     except requests.exceptions.ConnectionError:
 
-        st.error(
-            "Could not connect to the weather service."
-        )
+        return {
+            "error": "connection"
+        }
 
-        return None
+    except requests.exceptions.RequestException:
 
-    except requests.exceptions.RequestException as e:
-
-        st.error(
-            f"Request failed: {e}"
-        )
-
-        return None
+        return {
+            "error": "request"
+        }
 
     except ValueError:
 
-        st.error(
-            "The weather service returned invalid data."
-        )
+        return {
+            "error": "invalid_data"
+        }
 
-        return None
+
+# =========================================================
+# HEADER
+# =========================================================
+
+st.title("🌤️ Weather App")
+
+st.markdown(
+    """
+    <div class="subtitle">
+        Get current weather and a 7-day forecast for cities in India.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 
 # =========================================================
@@ -245,7 +298,6 @@ city = st.text_input(
     placeholder="Try Bangalore, Mumbai, Chennai, Hyderabad..."
 )
 
-
 search_button = st.button(
     "Get Weather",
     use_container_width=True
@@ -253,7 +305,7 @@ search_button = st.button(
 
 
 # =========================================================
-# MAIN LOGIC
+# WEATHER PROCESSING
 # =========================================================
 
 if search_button:
@@ -264,43 +316,166 @@ if search_button:
 
     else:
 
-        # -----------------------------------------
-        # LOCATION
-        # -----------------------------------------
+        # =============================================
+        # FIND CITY
+        # =============================================
 
         with st.spinner("Finding your city..."):
 
             location = get_coordinates(
-                city.strip()
+                city.strip().lower()
             )
 
-        if location is None:
+        # ---------------------------------------------
+        # LOCATION RATE LIMIT
+        # ---------------------------------------------
+
+        if location and location.get("error") == "rate_limit":
+
+            st.warning(
+                "🌐 The location service is temporarily "
+                "rate-limited. Please try again later."
+            )
+
+        elif location is None:
 
             st.error(
                 f"Couldn't find '{city}' in India. "
-                "Try checking the spelling."
+                "Please check the spelling."
+            )
+
+        elif location.get("error"):
+
+            st.error(
+                "Unable to connect to the location service."
             )
 
         else:
 
-            # -----------------------------------------
-            # WEATHER
-            # -----------------------------------------
+            # =============================================
+            # GET WEATHER
+            # =============================================
 
             with st.spinner("Getting weather information..."):
 
-                weather = get_weather(
+                weather_result = get_weather(
                     location["latitude"],
                     location["longitude"]
                 )
 
-            if weather is None:
+            # =============================================
+            # WEATHER RATE LIMIT
+            # =============================================
+
+            if (
+                weather_result
+                and weather_result.get("error")
+                == "rate_limit"
+            ):
+
+                st.warning(
+                    """
+                    🌐 **Weather service rate limit reached.**
+
+                    Open-Meteo has temporarily stopped new
+                    requests. This is a limit from the weather
+                    service, not an error with your app.
+
+                    Please try again later.
+                    """
+                )
+
+            # =============================================
+            # TIMEOUT
+            # =============================================
+
+            elif (
+                weather_result
+                and weather_result.get("error")
+                == "timeout"
+            ):
+
+                st.error(
+                    "⏱️ The weather service took too long "
+                    "to respond. Please try again."
+                )
+
+            # =============================================
+            # CONNECTION ERROR
+            # =============================================
+
+            elif (
+                weather_result
+                and weather_result.get("error")
+                == "connection"
+            ):
+
+                st.error(
+                    "🌐 Could not connect to the weather "
+                    "service. Please try again."
+                )
+
+            # =============================================
+            # OTHER REQUEST ERROR
+            # =============================================
+
+            elif (
+                weather_result
+                and weather_result.get("error")
+                == "request"
+            ):
+
+                st.error(
+                    "⚠️ The weather request failed. "
+                    "Please try again later."
+                )
+
+            # =============================================
+            # API ERROR
+            # =============================================
+
+            elif (
+                weather_result
+                and weather_result.get("error")
+                == "api"
+            ):
+
+                st.error(
+                    "⚠️ Weather service returned an error."
+                )
+
+            # =============================================
+            # INVALID DATA
+            # =============================================
+
+            elif (
+                weather_result
+                and weather_result.get("error")
+                == "invalid_data"
+            ):
+
+                st.error(
+                    "⚠️ The weather service returned "
+                    "unexpected data."
+                )
+
+            # =============================================
+            # NO RESPONSE
+            # =============================================
+
+            elif weather_result is None:
 
                 st.error(
                     "Unable to retrieve weather data right now."
                 )
 
+            # =============================================
+            # SUCCESS
+            # =============================================
+
             else:
+
+                weather = weather_result["data"]
 
                 current = weather["current"]
 
@@ -310,28 +485,31 @@ if search_button:
                     )
                 )
 
-                # -----------------------------------------
+                # =========================================
                 # LOCATION
-                # -----------------------------------------
+                # =========================================
 
                 state_text = ""
 
-                if location["state"]:
-                    state_text = f', {location["state"]}'
+                if location.get("state"):
+                    state_text = (
+                        f', {location["state"]}'
+                    )
 
                 st.markdown(
                     f"""
                     <div class="location">
-                        📍 {location["name"]}{state_text},
+                        📍 {location["name"]}
+                        {state_text},
                         {location["country"]}
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
 
-                # -----------------------------------------
+                # =========================================
                 # WEATHER CARD
-                # -----------------------------------------
+                # =========================================
 
                 weather_card = f"""
                 <div class="weather-card">
@@ -349,7 +527,8 @@ if search_button:
                     </div>
 
                     <div class="feels-like">
-                        Feels like {current["apparent_temperature"]}°C
+                        Feels like
+                        {current["apparent_temperature"]}°C
                     </div>
 
                 </div>
@@ -357,9 +536,9 @@ if search_button:
 
                 st.html(weather_card)
 
-                # -----------------------------------------
-                # WEATHER DETAILS
-                # -----------------------------------------
+                # =========================================
+                # CURRENT CONDITIONS
+                # =========================================
 
                 st.subheader("Current Conditions")
 
@@ -386,9 +565,18 @@ if search_button:
                         f'{current["precipitation"]} mm'
                     )
 
-                # -----------------------------------------
+                # =========================================
+                # LAST UPDATED
+                # =========================================
+
+                st.caption(
+                    f'🕒 Data fetched: '
+                    f'{weather_result["updated_at"]}'
+                )
+
+                # =========================================
                 # 7 DAY FORECAST
-                # -----------------------------------------
+                # =========================================
 
                 st.subheader("📅 7-Day Forecast")
 
@@ -430,17 +618,20 @@ if search_button:
 
                     with col2:
                         st.write(
-                            f"{forecast_icon} {forecast_name}"
+                            f"{forecast_icon} "
+                            f"{forecast_name}"
                         )
 
                     with col3:
                         st.write(
-                            f"🌡️ {max_temp}°C / {min_temp}°C"
+                            f"🌡️ {max_temp}°C / "
+                            f"{min_temp}°C"
                         )
 
                     with col4:
                         st.write(
-                            f"🌧️ {rain_probability}%"
+                            f"🌧️ "
+                            f"{rain_probability}%"
                         )
 
                     st.divider()
@@ -453,7 +644,21 @@ if search_button:
 st.markdown(
     """
     <div class="footer">
-        Built with Python + Streamlit + Open-Meteo
+
+        Built with Python + Streamlit
+
+        <br>
+
+        Weather data provided by
+        <a href="https://open-meteo.com/"
+           target="_blank">
+            Open-Meteo
+        </a>
+
+        <br>
+
+        Data licensed under CC BY 4.0
+
     </div>
     """,
     unsafe_allow_html=True
