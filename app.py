@@ -75,6 +75,7 @@ def get_weather_description(code):
 # GET LOCATION
 # =========================================================
 
+@st.cache_data(ttl=86400)
 def get_coordinates(city):
 
     url = "https://geocoding-api.open-meteo.com/v1/search"
@@ -134,6 +135,7 @@ def get_coordinates(city):
 # GET WEATHER
 # =========================================================
 
+@st.cache_data(ttl=1800)
 def get_weather(latitude, longitude):
 
     url = "https://api.open-meteo.com/v1/forecast"
