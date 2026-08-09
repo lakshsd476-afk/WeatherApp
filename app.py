@@ -168,31 +168,70 @@ def get_weather(latitude, longitude):
         response = requests.get(
             url,
             params=params,
-            timeout=10
+            timeout=20
         )
 
-        response.raise_for_status()
+        # THIS IS IMPORTANT
+        # If Open-Meteo rejects the request,
+        # show us exactly why.
+        if response.status_code != 200:
 
-        return response.json()
+            st.error(
+                f"Weather API error: "
+                f"{response.status_code}"
+            )
 
-    except requests.RequestException:
+            st.code(response.text)
+
+            return None
+
+        data = response.json()
+
+        # Check whether API returned an error
+        if data.get("error"):
+
+            st.error(
+                data.get(
+                    "reason",
+                    "Unknown Open-Meteo error"
+                )
+            )
+
+            return None
+
+        return data
+
+    except requests.exceptions.Timeout:
+
+        st.error(
+            "The weather service took too long to respond."
+        )
+
         return None
 
+    except requests.exceptions.ConnectionError:
 
-# =========================================================
-# HEADER
-# =========================================================
+        st.error(
+            "Could not connect to the weather service."
+        )
 
-st.title("🌤️ Weather App")
+        return None
 
-st.markdown(
-    """
-    <div class="subtitle">
-        Get current weather and a 7-day forecast for cities in India.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    except requests.exceptions.RequestException as e:
+
+        st.error(
+            f"Request failed: {e}"
+        )
+
+        return None
+
+    except ValueError:
+
+        st.error(
+            "The weather service returned invalid data."
+        )
+
+        return None
 
 
 # =========================================================
